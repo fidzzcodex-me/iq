@@ -1,81 +1,138 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
-import { Brain, Hash, MessageSquare, Shapes, ChevronRight } from 'lucide-react';
-import { getTestSet } from '../lib/questions';
+import { Brain, Hash, MessageSquare, Puzzle, ChevronRight, SkipForward, Loader2 } from 'lucide-react';
+import { getLocalUser } from '../lib/userClient';
 import TimerRing from '../components/TimerRing';
+import VisualPuzzle from '../components/VisualPuzzle';
 
 const CATEGORY_META = {
   numeric: { label: 'Numerik', icon: Hash },
   logic: { label: 'Logika', icon: Brain },
   verbal: { label: 'Verbal', icon: MessageSquare },
-  spatial: { label: 'Spasial', icon: Shapes },
+  spatial: { label: 'Spasial', icon: Puzzle },
 };
-
-const MAX_SECONDS_PER_QUESTION = 45;
 
 export default function TestPage() {
   const router = useRouter();
-  const [questions] = useState(() => getTestSet(25));
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const { level } = router.query;
+
+  const [sessionId, setSessionId] = useState(null);
+  const [question, setQuestion] = useState(null);
+  const [totalQuestions, setTotalQuestions] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
-  const [answers, setAnswers] = useState([]);
-  const [secondsLeft, setSecondsLeft] = useState(MAX_SECONDS_PER_QUESTION);
-  const questionStartRef = useRef(Date.now());
+  const [submitting, setSubmitting] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(45);
   const timerRef = useRef(null);
 
-  const current = questions[currentIndex];
-  const meta = CATEGORY_META[current.category];
-  const Icon = meta.icon;
-
-  const goNext = useCallback((chosenOption) => {
-    const timeTakenSeconds = (Date.now() - questionStartRef.current) / 1000;
-    const newAnswers = [...answers, {
-      question: current,
-      selectedOption: chosenOption,
-      timeTakenSeconds: Math.min(timeTakenSeconds, MAX_SECONDS_PER_QUESTION),
-    }];
-    setAnswers(newAnswers);
-
-    if (currentIndex + 1 >= questions.length) {
-      sessionStorage.setItem('iq_test_answers', JSON.stringify(
-        newAnswers.map((a) => ({
-          questionId: a.question.id,
-          selectedOption: a.selectedOption,
-          timeTakenSeconds: a.timeTakenSeconds,
-        }))
-      ));
-      router.push('/result');
-    } else {
-      setCurrentIndex((i) => i + 1);
-      setSelected(null);
-      setSecondsLeft(MAX_SECONDS_PER_QUESTION);
-      questionStartRef.current = Date.now();
+  // Mulai sesi begitu level sudah diketahui dari query string.
+  useEffect(() => {
+    if (!level) return;
+    const user = getLocalUser();
+    if (!user) {
+      router.replace('/');
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [answers, current, currentIndex, questions.length, router]);
+
+    fetch('/api/v1/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level, userId: user.userId }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) throw new Error(data.message || 'Gagal memulai tes.');
+        setSessionId(data.sessionId);
+        setTotalQuestions(data.totalQuestions);
+        setQuestion(data.question);
+        setSecondsLeft(data.question.timeLimitSeconds);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [level, router]);
+
+  const advance = useCallback(async (body) => {
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/v1/session/${sessionId}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Terjadi kesalahan.');
+
+      if (data.done) {
+        sessionStorage.setItem('cognitest_result', JSON.stringify({ ...data.result, level }));
+        router.push('/result');
+      } else {
+        setQuestion(data.question);
+        setSelected(null);
+        setSecondsLeft(data.question.timeLimitSeconds);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [sessionId, level, router]);
 
   useEffect(() => {
+    if (!question || submitting) return;
+    clearInterval(timerRef.current);
     timerRef.current = setInterval(() => {
       setSecondsLeft((s) => {
         if (s <= 1) {
           clearInterval(timerRef.current);
-          goNext(null); // waktu habis, dihitung sebagai tidak dijawab
+          advance({ skip: true }); // waktu habis -> dihitung skip/salah
           return 0;
         }
         return s - 1;
       });
     }, 1000);
     return () => clearInterval(timerRef.current);
-  }, [currentIndex, goNext]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [question?.id]);
 
   function handleSelect(option) {
-    if (selected) return; // cegah klik ganda
+    if (selected || submitting) return;
     setSelected(option);
     clearInterval(timerRef.current);
-    setTimeout(() => goNext(option), 350); // jeda singkat untuk feedback visual
+    setTimeout(() => advance({ selectedOption: option }), 300);
   }
 
-  const progressPct = ((currentIndex) / questions.length) * 100;
+  function handleSkip() {
+    if (selected || submitting) return;
+    clearInterval(timerRef.current);
+    advance({ skip: true });
+  }
+
+  if (loading) {
+    return (
+      <div className="shell" style={{ paddingTop: 80, textAlign: 'center' }}>
+        <Loader2 size={24} className="spin" style={{ color: 'var(--blue-500)' }} />
+        <p style={{ color: 'var(--ink-faint)', marginTop: 12 }}>Menyiapkan soal...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="shell" style={{ paddingTop: 60, textAlign: 'center' }}>
+        <p style={{ color: '#b91c1c', fontWeight: 600 }}>{error}</p>
+        <button className="btn-secondary" style={{ marginTop: 16 }} onClick={() => router.push('/')}>
+          Kembali ke beranda
+        </button>
+      </div>
+    );
+  }
+
+  if (!question) return null;
+
+  const meta = CATEGORY_META[question.category] || CATEGORY_META.numeric;
+  const Icon = meta.icon;
+  const progressPct = (question.index / question.total) * 100;
 
   return (
     <>
@@ -84,42 +141,53 @@ export default function TestPage() {
 
       <div className="shell" style={{ paddingTop: 30 }}>
         <div className="progress-meta">
-          <span>Soal {currentIndex + 1} dari {questions.length}</span>
+          <span>Soal {question.index + 1} dari {question.total}</span>
           <span>{Math.round(progressPct)}%</span>
         </div>
         <div className="progress-track">
           <div className="progress-fill" style={{ width: `${progressPct}%` }} />
         </div>
 
-        <div className="nb-card" style={{ marginTop: 24 }} key={current.id} data-aos="fade-up">
+        <div className="nb-card" style={{ marginTop: 24 }} key={question.id} data-aos="fade-up">
           <div className="question-header">
             <span className="category-tag">
               <Icon size={12} />
               {meta.label}
             </span>
-            <TimerRing secondsLeft={secondsLeft} totalSeconds={MAX_SECONDS_PER_QUESTION} />
+            <TimerRing secondsLeft={secondsLeft} totalSeconds={question.timeLimitSeconds} />
           </div>
 
-          <div className="question-text">{current.question}</div>
+          <div className="question-text">{question.question}</div>
 
-          <div className="option-grid">
-            {current.options.map((opt, i) => {
-              const letter = String.fromCharCode(65 + i);
-              const isSelected = selected === opt;
-              return (
-                <button
-                  key={opt}
-                  className={`option-btn ${isSelected ? 'selected' : ''}`}
-                  onClick={() => handleSelect(opt)}
-                  disabled={!!selected}
-                >
-                  <span className="option-letter">{letter}</span>
-                  {opt}
-                  {isSelected && <ChevronRight size={16} style={{ marginLeft: 'auto' }} />}
-                </button>
-              );
-            })}
-          </div>
+          {question.isVisual ? (
+            <div style={{ marginTop: 20 }}>
+              <VisualPuzzle question={question} selected={selected} onSelect={handleSelect} disabled={!!selected || submitting} />
+            </div>
+          ) : (
+            <div className="option-grid">
+              {question.options.map((opt, i) => {
+                const letter = String.fromCharCode(65 + i);
+                const isSelected = selected === opt;
+                return (
+                  <button
+                    key={opt}
+                    className={`option-btn ${isSelected ? 'selected' : ''}`}
+                    onClick={() => handleSelect(opt)}
+                    disabled={!!selected || submitting}
+                  >
+                    <span className="option-letter">{letter}</span>
+                    {opt}
+                    {isSelected && <ChevronRight size={16} style={{ marginLeft: 'auto' }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <button className="skip-btn" onClick={handleSkip} disabled={!!selected || submitting}>
+            <SkipForward size={14} />
+            Lewati soal ini
+          </button>
         </div>
       </div>
     </>
