@@ -1,38 +1,44 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import {
-  Brain, Hash, MessageSquare, Shapes, RotateCcw, TrendingUp,
-  CheckCircle2, Clock, Zap, AlertTriangle, Trophy,
+  Brain, Hash, MessageSquare, Puzzle, RotateCcw, TrendingUp,
+  CheckCircle2, Clock, Zap, AlertTriangle, Trophy, SkipForward, Home,
 } from 'lucide-react';
-import { questions as allQuestions } from '../lib/questions';
-import { computeFinalScore, getPercentileLabel } from '../lib/scoring';
+import { getPercentileLabel } from '../lib/scoring';
+import { getLocalUser } from '../lib/userClient';
 import ScoreRing from '../components/ScoreRing';
 
 const CATEGORY_META = {
   numeric: { label: 'Numerik', icon: Hash },
   logic: { label: 'Logika', icon: Brain },
   verbal: { label: 'Verbal', icon: MessageSquare },
-  spatial: { label: 'Spasial', icon: Shapes },
+  spatial: { label: 'Spasial', icon: Puzzle },
 };
 
 export default function ResultPage() {
   const router = useRouter();
   const [result, setResult] = useState(null);
+  const [rank, setRank] = useState(null);
 
   useEffect(() => {
-    const raw = sessionStorage.getItem('iq_test_answers');
+    const raw = sessionStorage.getItem('cognitest_result');
     if (!raw) {
       router.replace('/');
       return;
     }
-    const stored = JSON.parse(raw);
-    const answers = stored.map((s) => ({
-      question: allQuestions.find((q) => q.id === s.questionId),
-      selectedOption: s.selectedOption,
-      timeTakenSeconds: s.timeTakenSeconds,
-    })).filter((a) => a.question);
+    const parsed = JSON.parse(raw);
+    setResult(parsed);
 
-    setResult(computeFinalScore(answers, stored.length));
+    const user = getLocalUser();
+    if (user) {
+      fetch(`/api/v1/leaderboard?level=${parsed.level}&limit=100`)
+        .then((r) => r.json())
+        .then((d) => {
+          const idx = (d.leaderboard || []).findIndex((e) => e.username === user.username);
+          if (idx >= 0) setRank(idx + 1);
+        })
+        .catch(() => {});
+    }
   }, [router]);
 
   if (!result) {
@@ -54,7 +60,7 @@ export default function ResultPage() {
         <div className="result-hero" data-aos="zoom-in">
           <span className="hero-badge">
             <Trophy size={13} />
-            Tes selesai
+            Tes {result.level} selesai
           </span>
         </div>
 
@@ -65,6 +71,12 @@ export default function ResultPage() {
               <TrendingUp size={14} />
               {percentile.label} · {percentile.percentile}
             </div>
+            {rank && (
+              <div className="rank-announcement">
+                <Trophy size={14} />
+                Peringkat #{rank} di papan peringkat {result.level}
+              </div>
+            )}
           </div>
 
           <div className="metric-grid">
@@ -85,6 +97,7 @@ export default function ResultPage() {
           <div className="category-breakdown">
             {Object.entries(result.categoryStats).map(([cat, stat]) => {
               const meta = CATEGORY_META[cat];
+              if (!meta) return null;
               const Icon = meta.icon;
               const pct = Math.round((stat.correct / stat.total) * 100);
               return (
@@ -104,8 +117,12 @@ export default function ResultPage() {
 
           <div style={{ display: 'flex', gap: 10, marginTop: 26 }}>
             <button className="btn-secondary" style={{ flex: 1 }} onClick={() => router.push('/')}>
+              <Home size={15} />
+              Beranda
+            </button>
+            <button className="btn-primary" style={{ flex: 1 }} onClick={() => router.push(`/test?level=${result.level}`)}>
               <RotateCcw size={15} />
-              Ulangi Tes
+              Ulangi
             </button>
           </div>
         </div>
@@ -114,6 +131,7 @@ export default function ResultPage() {
           <h3 style={{ fontSize: 15, margin: '0 0 14px' }}>Ringkasan</h3>
           <div style={{ display: 'grid', gap: 12 }}>
             <SummaryRow icon={CheckCircle2} label="Jawaban benar" value={`${result.correctCount} dari ${result.totalQuestions}`} />
+            <SummaryRow icon={SkipForward} label="Soal dilewati" value={`${result.skippedCount || 0}`} />
             <SummaryRow icon={Clock} label="Total waktu" value={`${Math.floor(result.totalTimeSeconds / 60)}m ${result.totalTimeSeconds % 60}s`} />
             <SummaryRow icon={Zap} label="Skor performa" value={`${result.performanceScore} / 1000`} />
           </div>
